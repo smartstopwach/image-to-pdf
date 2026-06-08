@@ -447,22 +447,27 @@
 <div id="toast"></div>
 
 <script>
-const images = [];
-let dragSrc = null;
+// ── Stable image store — objects never move, only order array changes ──
+const imageStore = {};   // id → {src, name, rotate}
+let imageOrder = [];     // ordered list of ids
+let nextId = 0;
 
-const grid = document.getElementById('image-grid');
-const fileInput = document.getElementById('file-input');
-const dropzone = document.getElementById('dropzone');
-const optBar = document.getElementById('options-bar');
-const gridHeader = document.getElementById('grid-header');
-const convertSection = document.getElementById('convert-section');
-const imgCount = document.getElementById('img-count');
-const convertBtn = document.getElementById('convert-btn');
+// ── Pointer-drag state ──
+let dragState = null;    // {id, ghost, startX, startY, scrollRAF}
 
-fileInput.addEventListener('change', e => addFiles(e.target.files));
+const grid        = document.getElementById('image-grid');
+const fileInput   = document.getElementById('file-input');
+const dropzone    = document.getElementById('dropzone');
+const optBar      = document.getElementById('options-bar');
+const gridHeader  = document.getElementById('grid-header');
+const convertSect = document.getElementById('convert-section');
+const imgCount    = document.getElementById('img-count');
+const convertBtn  = document.getElementById('convert-btn');
 
-dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('over'); });
-dropzone.addEventListener('dragleave', () => dropzone.classList.remove('over'));
+// ── File input / dropzone ──
+fileInput.addEventListener('change', e => { addFiles(e.target.files); fileInput.value = ''; });
+dropzone.addEventListener('dragover',  e => { e.preventDefault(); dropzone.classList.add('over'); });
+dropzone.addEventListener('dragleave', ()=> dropzone.classList.remove('over'));
 dropzone.addEventListener('drop', e => {
   e.preventDefault(); dropzone.classList.remove('over');
   addFiles(e.dataTransfer.files);
@@ -471,44 +476,43 @@ dropzone.addEventListener('drop', e => {
 function addFiles(files) {
   const valid = Array.from(files).filter(f => f.type.startsWith('image/'));
   if (!valid.length) { showToast('No valid image files found.', 'error'); return; }
+  let loaded = 0;
   valid.forEach(file => {
     const reader = new FileReader();
     reader.onload = ev => {
-      images.push({ src: ev.target.result, name: file.name, rotate: 0, file });
-      render();
+      const id = 'img_' + (nextId++);
+      imageStore[id] = { src: ev.target.result, name: file.name, rotate: 0 };
+      imageOrder.push(id);
+      loaded++;
+      if (loaded === valid.length) render();
     };
     reader.readAsDataURL(file);
   });
-  fileInput.value = '';
 }
 
+// ── Render — creates cards from imageOrder, attaches pointer drag ──
 function render() {
   grid.innerHTML = '';
-  if (!images.length) {
-    optBar.style.display = 'none';
-    gridHeader.style.display = 'none';
-    convertSection.style.display = 'none';
-    return;
-  }
-  optBar.style.display = 'flex';
-  gridHeader.style.display = 'flex';
-  convertSection.style.display = 'flex';
-  imgCount.textContent = `${images.length} image${images.length > 1 ? 's' : ''} · drag to reorder`;
 
-  images.forEach((img, i) => {
+  const hasImages = imageOrder.length > 0;
+  optBar.style.display      = hasImages ? 'flex'  : 'none';
+  gridHeader.style.display  = hasImages ? 'flex'  : 'none';
+  convertSect.style.display = hasImages ? 'flex'  : 'none';
+  if (!hasImages) return;
+
+  imgCount.textContent = `${imageOrder.length} image${imageOrder.length > 1 ? 's' : ''} · hold & drag to reorder`;
+
+  imageOrder.forEach((id, idx) => {
+    const img = imageStore[id];
     const card = document.createElement('div');
     card.className = 'img-card';
-    card.draggable = true;
-    card.dataset.idx = i;
+    card.dataset.id = id;
 
     const preview = document.createElement('img');
     preview.className = 'img-preview';
     preview.src = img.src;
-    preview.style.transform = `rotate(${img.rotate}deg)`;
-    if (img.rotate % 180 !== 0) {
-      preview.style.objectFit = 'contain';
-      preview.style.padding = '8px';
-    }
+    preview.draggable = false;   // prevent browser native image drag
+    applyRotationStyle(preview, img.rotate);
 
     const actions = document.createElement('div');
     actions.className = 'img-actions';
@@ -517,29 +521,38 @@ function render() {
     rotBtn.className = 'img-action-btn btn-rot';
     rotBtn.title = 'Rotate 90°';
     rotBtn.innerHTML = '↻';
-    rotBtn.onclick = e => { e.stopPropagation(); images[i].rotate = (img.rotate + 90) % 360; render(); };
+    rotBtn.addEventListener('pointerdown', e => e.stopPropagation());
+    rotBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      imageStore[id].rotate = (imageStore[id].rotate + 90) % 360;
+      applyRotationStyle(preview, imageStore[id].rotate);
+      updateNumbers();
+    });
 
     const delBtn = document.createElement('button');
     delBtn.className = 'img-action-btn btn-del';
     delBtn.title = 'Remove';
     delBtn.innerHTML = '✕';
     delBtn.style.color = '#fff';
-    delBtn.onclick = e => { e.stopPropagation(); images.splice(i, 1); render(); };
+    delBtn.addEventListener('pointerdown', e => e.stopPropagation());
+    delBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      imageOrder = imageOrder.filter(x => x !== id);
+      delete imageStore[id];
+      render();
+    });
 
     actions.appendChild(rotBtn);
     actions.appendChild(delBtn);
 
     const footer = document.createElement('div');
     footer.className = 'img-footer';
-
     const nameEl = document.createElement('span');
     nameEl.className = 'img-name';
     nameEl.textContent = img.name;
-
     const numEl = document.createElement('span');
     numEl.className = 'img-num';
-    numEl.textContent = `#${i+1}`;
-
+    numEl.textContent = `#${idx + 1}`;
     footer.appendChild(nameEl);
     footer.appendChild(numEl);
 
@@ -547,48 +560,163 @@ function render() {
     card.appendChild(actions);
     card.appendChild(footer);
 
-    // Drag events
-    card.addEventListener('dragstart', e => {
-      dragSrc = i;
-      setTimeout(() => card.classList.add('dragging'), 0);
-      e.dataTransfer.effectAllowed = 'move';
-    });
-    card.addEventListener('dragend', () => card.classList.remove('dragging'));
-    card.addEventListener('dragover', e => {
-      e.preventDefault();
-      document.querySelectorAll('.img-card').forEach(c => c.classList.remove('drag-over'));
-      card.classList.add('drag-over');
-    });
-    card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
-    card.addEventListener('drop', e => {
-      e.preventDefault();
-      card.classList.remove('drag-over');
-      if (dragSrc === null || dragSrc === i) return;
-      const moved = images.splice(dragSrc, 1)[0];
-      images.splice(i, 0, moved);
-      dragSrc = null;
-      render();
-    });
+    // ── Pointer-based drag start ──
+    card.addEventListener('pointerdown', e => startDrag(e, id, card));
 
     grid.appendChild(card);
   });
 }
 
+function applyRotationStyle(el, rot) {
+  el.style.transform = `rotate(${rot}deg)`;
+  el.style.objectFit = (rot % 180 !== 0) ? 'contain' : 'cover';
+  el.style.padding   = (rot % 180 !== 0) ? '8px' : '0';
+}
+
+function updateNumbers() {
+  grid.querySelectorAll('.img-card').forEach((card, i) => {
+    const num = card.querySelector('.img-num');
+    if (num) num.textContent = `#${i + 1}`;
+  });
+  imgCount.textContent = `${imageOrder.length} image${imageOrder.length > 1 ? 's' : ''} · hold & drag to reorder`;
+}
+
+// ── Pointer drag logic ──
+function startDrag(e, id, card) {
+  if (e.button !== 0) return;   // left button only
+  e.preventDefault();
+
+  const rect = card.getBoundingClientRect();
+
+  // Build ghost
+  const ghost = card.cloneNode(true);
+  ghost.style.cssText = `
+    position: fixed;
+    width: ${rect.width}px;
+    height: ${rect.height}px;
+    left: ${rect.left}px;
+    top: ${rect.top}px;
+    opacity: 0.85;
+    pointer-events: none;
+    z-index: 9999;
+    border: 2px solid var(--accent);
+    border-radius: var(--radius);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+    transform: scale(1.04);
+    transition: none;
+    cursor: grabbing;
+  `;
+  document.body.appendChild(ghost);
+
+  card.classList.add('dragging');
+
+  dragState = {
+    id,
+    ghost,
+    card,
+    offsetX: e.clientX - rect.left,
+    offsetY: e.clientY - rect.top,
+    scrollRAF: null
+  };
+
+  document.addEventListener('pointermove', onDragMove, { passive: false });
+  document.addEventListener('pointerup',   onDragEnd);
+  document.addEventListener('pointercancel', onDragEnd);
+}
+
+function onDragMove(e) {
+  if (!dragState) return;
+  e.preventDefault();
+
+  const { ghost, offsetX, offsetY } = dragState;
+
+  const gx = e.clientX - offsetX;
+  const gy = e.clientY - offsetY;
+  ghost.style.left = gx + 'px';
+  ghost.style.top  = gy + 'px';
+
+  // ── Auto-scroll: if pointer near top/bottom edge of viewport ──
+  const ZONE = 80;   // px from edge to start scrolling
+  const MAX  = 18;   // max px per frame
+  const vy = e.clientY;
+  const vh = window.innerHeight;
+
+  cancelAnimationFrame(dragState.scrollRAF);
+
+  function doScroll() {
+    if (!dragState) return;
+    let speed = 0;
+    if (vy < ZONE)       speed = -MAX * (1 - vy / ZONE);
+    else if (vy > vh - ZONE) speed = MAX * ((vy - (vh - ZONE)) / ZONE);
+    if (speed !== 0) {
+      window.scrollBy(0, speed);
+      dragState.scrollRAF = requestAnimationFrame(doScroll);
+    }
+  }
+  doScroll();
+
+  // ── Find which card is under the pointer ──
+  ghost.style.display = 'none';
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  ghost.style.display = '';
+
+  const targetCard = under && under.closest('.img-card');
+  document.querySelectorAll('.img-card').forEach(c => c.classList.remove('drag-over'));
+
+  if (targetCard && targetCard !== dragState.card) {
+    targetCard.classList.add('drag-over');
+    dragState.overCard = targetCard;
+  } else {
+    dragState.overCard = null;
+  }
+}
+
+function onDragEnd(e) {
+  if (!dragState) return;
+
+  cancelAnimationFrame(dragState.scrollRAF);
+  document.removeEventListener('pointermove', onDragMove);
+  document.removeEventListener('pointerup',   onDragEnd);
+  document.removeEventListener('pointercancel', onDragEnd);
+
+  const { id, ghost, card, overCard } = dragState;
+  dragState = null;
+
+  ghost.remove();
+  card.classList.remove('dragging');
+  document.querySelectorAll('.img-card').forEach(c => c.classList.remove('drag-over'));
+
+  if (overCard && overCard !== card) {
+    const targetId = overCard.dataset.id;
+    const srcIdx   = imageOrder.indexOf(id);
+    const tgtIdx   = imageOrder.indexOf(targetId);
+    if (srcIdx !== -1 && tgtIdx !== -1) {
+      // Swap in order array
+      imageOrder.splice(srcIdx, 1);
+      imageOrder.splice(tgtIdx, 0, id);
+      render();
+    }
+  }
+}
+
+// ── Toolbar actions ──
 function rotateAll() {
-  images.forEach(img => img.rotate = (img.rotate + 90) % 360);
+  imageOrder.forEach(id => { imageStore[id].rotate = (imageStore[id].rotate + 90) % 360; });
   render();
 }
 
 function clearAll() {
-  if (!images.length) return;
-  if (confirm(`Remove all ${images.length} images?`)) {
-    images.length = 0;
+  if (!imageOrder.length) return;
+  if (confirm(`Remove all ${imageOrder.length} images?`)) {
+    imageOrder = [];
+    for (const k in imageStore) delete imageStore[k];
     render();
   }
 }
 
+// ── PDF generation ──
 async function convertToPDF() {
-  if (!images.length) return;
+  if (!imageOrder.length) return;
   convertBtn.disabled = true;
 
   const pw = document.getElementById('progress-wrap');
@@ -596,90 +724,74 @@ async function convertToPDF() {
   const pl = document.getElementById('progress-label');
   pw.style.display = 'block';
 
-  const pageSize = document.getElementById('page-size').value;
+  const pageSize  = document.getElementById('page-size').value;
   const orientation = document.getElementById('orientation').value;
-  const margin = parseInt(document.getElementById('margin').value) || 0;
-  const fitMode = document.getElementById('img-fit').value;
-  const pdfName = (document.getElementById('pdf-name').value || 'my-document').replace(/\.pdf$/i, '');
+  const margin    = parseInt(document.getElementById('margin').value) || 0;
+  const fitMode   = document.getElementById('img-fit').value;
+  const pdfName   = (document.getElementById('pdf-name').value || 'my-document').replace(/\.pdf$/i, '');
 
   const { jsPDF } = window.jspdf;
 
   try {
     let doc = null;
 
-    for (let i = 0; i < images.length; i++) {
-      pl.textContent = `Processing image ${i+1} of ${images.length}…`;
-      pb.style.width = ((i / images.length) * 100) + '%';
+    for (let i = 0; i < imageOrder.length; i++) {
+      const id = imageOrder[i];
+      const imgData = imageStore[id];
 
-      const imgData = images[i];
-      await new Promise(resolve => setTimeout(resolve, 10));
+      pl.textContent = `Processing image ${i+1} of ${imageOrder.length}…`;
+      pb.style.width = ((i / imageOrder.length) * 100) + '%';
+      await new Promise(r => setTimeout(r, 10));
 
-      // Load image to get natural dimensions
-      const imgEl = await loadImage(imgData.src, imgData.rotate);
-      const iw = imgEl.naturalWidth || imgEl.width;
-      const ih = imgEl.naturalHeight || imgEl.height;
+      const imgEl = await loadImage(imgData.src);
+      let iw = imgEl.naturalWidth, ih = imgEl.naturalHeight;
+
+      // Account for rotation
+      const rot = imgData.rotate;
+      if (rot === 90 || rot === 270) { [iw, ih] = [ih, iw]; }
+
       const isLandscape = iw > ih;
-
-      let orient = orientation;
-      if (orient === 'auto') orient = isLandscape ? 'landscape' : 'portrait';
+      let orient = orientation === 'auto' ? (isLandscape ? 'landscape' : 'portrait') : orientation;
 
       let format;
-      if (pageSize === 'fit') {
-        format = [mmFromPx(iw), mmFromPx(ih)];
-        orient = 'portrait';
-      } else {
-        const sizes = { a4: 'a4', a3: 'a3', letter: 'letter', legal: 'legal' };
-        format = sizes[pageSize] || 'a4';
-      }
+      if (pageSize === 'fit') { format = [mmFromPx(iw), mmFromPx(ih)]; orient = 'portrait'; }
+      else { format = pageSize; }
 
-      if (!doc) {
-        doc = new jsPDF({ orientation: orient, unit: 'mm', format });
-      } else {
-        doc.addPage(format, orient);
-      }
+      if (!doc) doc = new jsPDF({ orientation: orient, unit: 'mm', format });
+      else       doc.addPage(format, orient);
 
-      const pw2 = Array.isArray(format) ? format[0] : doc.internal.pageSize.getWidth();
-      const ph2 = Array.isArray(format) ? format[1] : doc.internal.pageSize.getHeight();
-      const contentW = pw2 - margin * 2;
-      const contentH = ph2 - margin * 2;
-
-      let dx = margin, dy = margin, dw = contentW, dh = contentH;
+      const pgW = doc.internal.pageSize.getWidth();
+      const pgH = doc.internal.pageSize.getHeight();
+      const cW = pgW - margin * 2, cH = pgH - margin * 2;
+      let dx = margin, dy = margin, dw = cW, dh = cH;
 
       if (fitMode === 'contain') {
-        const ratio = Math.min(contentW / iw, contentH / ih);
-        dw = iw * ratio; dh = ih * ratio;
-        dx = margin + (contentW - dw) / 2;
-        dy = margin + (contentH - dh) / 2;
+        const r = Math.min(cW / iw, cH / ih);
+        dw = iw * r; dh = ih * r;
+        dx = margin + (cW - dw) / 2; dy = margin + (cH - dh) / 2;
       } else if (fitMode === 'center') {
-        const mmW = mmFromPx(iw), mmH = mmFromPx(ih);
-        dw = Math.min(mmW, contentW); dh = Math.min(mmH, contentH);
-        dx = margin + (contentW - dw) / 2;
-        dy = margin + (contentH - dh) / 2;
+        dw = Math.min(mmFromPx(iw), cW); dh = Math.min(mmFromPx(ih), cH);
+        dx = margin + (cW - dw) / 2; dy = margin + (cH - dh) / 2;
       }
 
-      // Get rotated image data
-      const rotCanvas = document.createElement('canvas');
-      const ctx = rotCanvas.getContext('2d');
-      const rot = imgData.rotate;
-      if (rot === 90 || rot === 270) {
-        rotCanvas.width = ih; rotCanvas.height = iw;
-      } else {
-        rotCanvas.width = iw; rotCanvas.height = ih;
-      }
+      // Draw rotated image to canvas
+      const srcW = imgEl.naturalWidth, srcH = imgEl.naturalHeight;
+      const cvs = document.createElement('canvas');
+      const ctx = cvs.getContext('2d');
+      if (rot === 90 || rot === 270) { cvs.width = srcH; cvs.height = srcW; }
+      else                            { cvs.width = srcW; cvs.height = srcH; }
       ctx.save();
-      ctx.translate(rotCanvas.width/2, rotCanvas.height/2);
+      ctx.translate(cvs.width / 2, cvs.height / 2);
       ctx.rotate((rot * Math.PI) / 180);
-      ctx.drawImage(imgEl, -iw/2, -ih/2);
+      ctx.drawImage(imgEl, -srcW / 2, -srcH / 2);
       ctx.restore();
 
-      const dataUrl = rotCanvas.toDataURL('image/jpeg', 0.95);
-      doc.addImage(dataUrl, 'JPEG', dx, dy, dw, dh);
+      doc.addImage(cvs.toDataURL('image/jpeg', 0.95), 'JPEG', dx, dy, dw, dh);
     }
 
     pb.style.width = '100%';
     pl.textContent = 'Generating PDF…';
     await new Promise(r => setTimeout(r, 100));
-
     doc.save(`${pdfName}.pdf`);
     showToast('✓ PDF downloaded successfully!', 'success');
   } catch (err) {
@@ -687,14 +799,10 @@ async function convertToPDF() {
     showToast('Something went wrong. Please try again.', 'error');
   }
 
-  setTimeout(() => {
-    pw.style.display = 'none';
-    pb.style.width = '0%';
-    convertBtn.disabled = false;
-  }, 800);
+  setTimeout(() => { pw.style.display = 'none'; pb.style.width = '0%'; convertBtn.disabled = false; }, 800);
 }
 
-function loadImage(src, rotate) {
+function loadImage(src) {
   return new Promise(resolve => {
     const img = new Image();
     img.onload = () => resolve(img);
@@ -702,14 +810,11 @@ function loadImage(src, rotate) {
   });
 }
 
-function mmFromPx(px) {
-  return px * 25.4 / 96;
-}
+function mmFromPx(px) { return px * 25.4 / 96; }
 
 function showToast(msg, type = '') {
   const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.className = 'show ' + type;
+  t.textContent = msg; t.className = 'show ' + type;
   clearTimeout(t._timeout);
   t._timeout = setTimeout(() => t.className = '', 3000);
 }
