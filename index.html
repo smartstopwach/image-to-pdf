@@ -724,13 +724,19 @@ async function convertToPDF() {
   const pl = document.getElementById('progress-label');
   pw.style.display = 'block';
 
-  const pageSize  = document.getElementById('page-size').value;
+  const pageSize    = document.getElementById('page-size').value;
   const orientation = document.getElementById('orientation').value;
-  const margin    = parseInt(document.getElementById('margin').value) || 0;
-  const fitMode   = document.getElementById('img-fit').value;
-  const pdfName   = (document.getElementById('pdf-name').value || 'my-document').replace(/\.pdf$/i, '');
+  const margin      = parseInt(document.getElementById('margin').value) || 0;
+  const fitMode     = document.getElementById('img-fit').value;
+  const pdfName     = (document.getElementById('pdf-name').value || 'my-document').replace(/\.pdf$/i, '');
 
   const { jsPDF } = window.jspdf;
+
+  // jsPDF uses 72 DPI internally for 'px' unit
+  // We use 'px' unit so 1px image = 1px PDF — exact 1:1 mapping, no DPI guessing
+  const PX_PER_MM = 72 / 25.4; // px per mm at 72dpi
+
+  function pxToMm(px) { return px / PX_PER_MM; }
 
   try {
     let doc = null;
@@ -744,38 +750,10 @@ async function convertToPDF() {
       await new Promise(r => setTimeout(r, 10));
 
       const imgEl = await loadImage(imgData.src);
-      let iw = imgEl.naturalWidth, ih = imgEl.naturalHeight;
-
-      // Account for rotation
-      const rot = imgData.rotate;
-      if (rot === 90 || rot === 270) { [iw, ih] = [ih, iw]; }
-
-      const isLandscape = iw > ih;
-      let orient = orientation === 'auto' ? (isLandscape ? 'landscape' : 'portrait') : orientation;
-
-      let format;
-      if (pageSize === 'fit') { format = [mmFromPx(iw), mmFromPx(ih)]; orient = 'portrait'; }
-      else { format = pageSize; }
-
-      if (!doc) doc = new jsPDF({ orientation: orient, unit: 'mm', format });
-      else       doc.addPage(format, orient);
-
-      const pgW = doc.internal.pageSize.getWidth();
-      const pgH = doc.internal.pageSize.getHeight();
-      const cW = pgW - margin * 2, cH = pgH - margin * 2;
-      let dx = margin, dy = margin, dw = cW, dh = cH;
-
-      if (fitMode === 'contain') {
-        const r = Math.min(cW / iw, cH / ih);
-        dw = iw * r; dh = ih * r;
-        dx = margin + (cW - dw) / 2; dy = margin + (cH - dh) / 2;
-      } else if (fitMode === 'center') {
-        dw = Math.min(mmFromPx(iw), cW); dh = Math.min(mmFromPx(ih), cH);
-        dx = margin + (cW - dw) / 2; dy = margin + (cH - dh) / 2;
-      }
-
-      // Draw rotated image to canvas
       const srcW = imgEl.naturalWidth, srcH = imgEl.naturalHeight;
+      const rot = imgData.rotate;
+
+      // Build rotated canvas — this is the actual pixel data we send to PDF
       const cvs = document.createElement('canvas');
       const ctx = cvs.getContext('2d');
       if (rot === 90 || rot === 270) { cvs.width = srcH; cvs.height = srcW; }
@@ -786,7 +764,42 @@ async function convertToPDF() {
       ctx.drawImage(imgEl, -srcW / 2, -srcH / 2);
       ctx.restore();
 
-      doc.addImage(cvs.toDataURL('image/jpeg', 0.95), 'JPEG', dx, dy, dw, dh);
+      // Final image dimensions after rotation
+      const iw = cvs.width, ih = cvs.height;
+
+      if (pageSize === 'fit') {
+        // ── FIT TO IMAGE: page size = exact image pixel size, image fills page 100% ──
+        // Use 'px' unit so dimensions are in pixels directly
+        const fmt = [iw, ih]; // page = image pixels
+        if (!doc) doc = new jsPDF({ orientation: 'portrait', unit: 'px', format: fmt, hotfixes: ['px_scaling'] });
+        else       doc.addPage(fmt, 'portrait');
+
+        // Place image at 0,0 covering full page — no margin, no scaling
+        doc.addImage(cvs.toDataURL('image/jpeg', 0.95), 'JPEG', 0, 0, iw, ih);
+
+      } else {
+        // ── STANDARD PAGE SIZE (A4, Letter etc) ──
+        const isLandscape = iw > ih;
+        let orient = orientation === 'auto' ? (isLandscape ? 'landscape' : 'portrait') : orientation;
+
+        if (!doc) doc = new jsPDF({ orientation: orient, unit: 'mm', format: pageSize });
+        else       doc.addPage(pageSize, orient);
+
+        const pgW = doc.internal.pageSize.getWidth();
+        const pgH = doc.internal.pageSize.getHeight();
+        const cW = pgW - margin * 2, cH = pgH - margin * 2;
+        let dx = margin, dy = margin, dw = cW, dh = cH;
+
+        if (fitMode === 'contain') {
+          const r = Math.min(cW / iw, cH / ih);
+          dw = iw * r; dh = ih * r;
+          dx = margin + (cW - dw) / 2;
+          dy = margin + (cH - dh) / 2;
+        }
+        // 'fill' = stretch to full content area (default dx/dy/dw/dh above)
+
+        doc.addImage(cvs.toDataURL('image/jpeg', 0.95), 'JPEG', dx, dy, dw, dh);
+      }
     }
 
     pb.style.width = '100%';
@@ -809,8 +822,6 @@ function loadImage(src) {
     img.src = src;
   });
 }
-
-function mmFromPx(px) { return px * 25.4 / 96; }
 
 function showToast(msg, type = '') {
   const t = document.getElementById('toast');
